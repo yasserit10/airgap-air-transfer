@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import CoreMedia
 
 public struct CameraScannerView: UIViewControllerRepresentable {
     public let onCodeScanned: (String) -> Void
@@ -89,8 +90,8 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
             if videoCaptureDevice.isExposureModeSupported(.continuousAutoExposure) {
                 videoCaptureDevice.exposureMode = .continuousAutoExposure
             }
-            if videoCaptureDevice.isExposureTargetBiasSupported {
-                let bias = max(videoCaptureDevice.minExposureTargetBias, -0.75)
+            if videoCaptureDevice.minExposureTargetBias < videoCaptureDevice.maxExposureTargetBias {
+                let bias = max(videoCaptureDevice.minExposureTargetBias, min(Float(-0.75), videoCaptureDevice.maxExposureTargetBias))
                 videoCaptureDevice.setExposureTargetBias(bias, completionHandler: nil)
             }
             if videoCaptureDevice.isLowLightBoostSupported {

@@ -219,9 +219,13 @@ public final class ReconstructionEngine: ObservableObject {
         // Standard zlib streams (RFC 1950) start with 0x78 and have a 4-byte Adler-32 trailer.
         // We prepare candidate buffers: if 0x78 is present, slice off header and trailer.
         var candidates: [Data] = []
-        if data.count > 6 && data[0] == 0x78 {
-            let rawSlice = data.subdata(in: 2..<(data.count - 4))
-            candidates.append(rawSlice)
+        if data.count > 6 && data.first == 0x78 {
+            let start = data.startIndex + 2
+            let end = data.endIndex - 4
+            if start < end {
+                let rawSlice = data.subdata(in: start..<end)
+                candidates.append(rawSlice)
+            }
         }
         candidates.append(data)
 
