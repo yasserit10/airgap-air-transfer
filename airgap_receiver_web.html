@@ -70,8 +70,11 @@
         </div>
         
         <div class="missing-box" id="missing-box">
-            <strong>⚠️ الإطارات المتبقية لإكمال الملف:</strong>
-            <span id="missing-list">--</span>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <strong>⚠️ الإطارات المتبقية لإكمال الملف:</strong>
+                <button onclick="copyMissing()" style="background:#f97316; color:#fff; border:none; padding:3px 10px; border-radius:6px; font-size:0.75rem; font-weight:bold; cursor:pointer;">نسخ الأرقام</button>
+            </div>
+            <span id="missing-list" style="word-break:break-all; display:block; font-family:monospace;">--</span>
         </div>
 
         <div class="grid" id="chunk-grid"></div>
@@ -88,7 +91,8 @@
             <div><strong>رمز التحقق:</strong> <span id="res-hash" style="font-family:monospace; color:#38bdf8;"></span></div>
         </div>
 
-        <a id="download-link" class="btn">💾 حفظ في تطبيق "الملفات"</a>
+        <button id="share-btn" class="btn" style="display:none; background:#10b981; margin-top:14px;">📲 مشاركة وحفظ في تطبيق "الملفات"</button>
+        <a id="download-link" class="btn" style="background:#2563eb;">💾 حفظ وتنزيل الملف مباشرة</a>
         <button class="btn btn-restart" onclick="resetScanner()">مسح داتابيس جديدة</button>
     </div>
 
@@ -201,22 +205,31 @@
                 const box = document.getElementById(`box-${index}`);
                 if (box) box.classList.add('active');
 
-                // If above 85% and a few chunks left, show the missing chunk numbers
+                // If above 70% or few chunks left, show the missing chunk numbers
                 const remaining = totalChunks - count;
                 const missingBox = document.getElementById('missing-box');
-                if (remaining <= 30 && remaining > 0) {
+                if ((remaining <= 40 || pct >= 70) && remaining > 0) {
                     missingBox.style.display = 'block';
                     let missingNums = [];
                     for (let i = 1; i <= totalChunks; i++) {
                         if (!receivedChunks[i]) missingNums.push(i);
-                        if (missingNums.length >= 15) break;
                     }
-                    document.getElementById('missing-list').textContent = missingNums.join(', ') + (remaining > 15 ? '...' : '');
+                    window._lastMissingList = missingNums.join(', ');
+                    document.getElementById('missing-list').textContent = missingNums.slice(0, 25).join(', ') + (missingNums.length > 25 ? ` ... (+${missingNums.length - 25} إطار)` : '');
                 } else if (remaining === 0) {
                     missingBox.style.display = 'none';
                     finalize();
                 }
             }
+        }
+
+        function copyMissing() {
+            const txt = window._lastMissingList || document.getElementById('missing-list').textContent;
+            navigator.clipboard.writeText(txt).then(() => {
+                alert("تم نسخ أرقام النواقص بنجاح! الصقها في خانة 'بث النواقص' بالكمبيوتر.");
+            }).catch(() => {
+                prompt("انسخ الأرقام من هنا:", txt);
+            });
         }
 
         function initGrid(total) {
@@ -235,57 +248,85 @@
             isDone = true;
             document.getElementById('prompt-txt').textContent = "جاري فك الضغط وفحص التجزئة...";
             
-            let combinedB64 = "";
-            for (let i = 1; i <= totalChunks; i++) {
-                combinedB64 += receivedChunks[i];
+            try {
+                let combinedB64 = "";
+                for (let i = 1; i <= totalChunks; i++) {
+                    combinedB64 += receivedChunks[i];
+                }
+
+                // Base64 to Uint8Array
+                const binaryString = atob(combinedB64);
+                const compressed = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    compressed[i] = binaryString.charCodeAt(i);
+                }
+
+                let decompressed;
+                try {
+                    decompressed = pako.inflate(compressed);
+                } catch (zlibErr) {
+                    console.log("Pako inflate error, checking fallback:", zlibErr);
+                    if (compressed[0] === 0xFD && typeof LZMA !== 'undefined') {
+                        decompressed = await new Promise((resolve, reject) => {
+                            LZMA.decompress(compressed, function(result, error) {
+                                if (error) reject(error);
+                                else resolve(typeof result === 'string' ? new TextEncoder().encode(result) : new Uint8Array(result));
+                            });
+                        });
+                    } else {
+                        throw zlibErr;
+                    }
+                }
+
+                // Compute SHA-256
+                const hashBuffer = await crypto.subtle.digest('SHA-256', decompressed);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+                if (!hashHex.startsWith(shortHash)) {
+                    alert("تحذير: رمز التحقق غير متطابق! قد تكون البيانات تالفة.");
+                    return;
+                }
+
+                // Create download link
+                const blob = new Blob([decompressed], { type: "application/octet-stream" });
+                const url = URL.createObjectURL(blob);
+                const link = document.getElementById('download-link');
+                link.href = url;
+                link.download = fileName;
+
+                // Native iOS Safari File Sharing
+                const shareBtn = document.getElementById('share-btn');
+                try {
+                    const file = new File([blob], fileName, { type: "application/octet-stream" });
+                    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                        shareBtn.style.display = 'block';
+                        shareBtn.onclick = async () => {
+                            try {
+                                await navigator.share({
+                                    files: [file],
+                                    title: fileName
+                                });
+                            } catch (e) {
+                                console.log("Share dismissed:", e);
+                            }
+                        };
+                    }
+                } catch (e) {
+                    console.log("File share setup error:", e);
+                }
+
+                document.getElementById('res-name').textContent = fileName;
+                document.getElementById('res-size').textContent = (decompressed.length / (1024*1024)).toFixed(2) + " MB";
+                document.getElementById('res-hash').textContent = shortHash + "...";
+
+                document.getElementById('camera-card').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'none';
+                document.getElementById('success-card').style.display = 'block';
+            } catch (err) {
+                alert("حدث خطأ أثناء فك ضغط الملف: " + err.message);
+                console.error(err);
             }
-
-            // Base64 to Uint8Array
-            const binaryString = atob(combinedB64);
-            const compressed = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                compressed[i] = binaryString.charCodeAt(i);
-            }
-
-            let decompressed;
-            // Check if LZMA (starts with 0xFD '7' 'z' 'X' 'Z')
-            if (compressed[0] === 0xFD && compressed[1] === 0x37 && compressed[2] === 0x7A && compressed[3] === 0x58) {
-                // Decompress LZMA
-                decompressed = await new Promise((resolve, reject) => {
-                    LZMA.decompress(compressed, function(result, error) {
-                        if (error) reject(error);
-                        else resolve(typeof result === 'string' ? new TextEncoder().encode(result) : new Uint8Array(result));
-                    });
-                });
-            } else {
-                // Decompress standard Zlib via Pako
-                decompressed = pako.inflate(compressed);
-            }
-
-            // Compute SHA-256
-            const hashBuffer = await crypto.subtle.digest('SHA-256', decompressed);
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-            if (!hashHex.startsWith(shortHash)) {
-                alert("تحذير: الهاش غير متطابق! قد تكون البيانات تالفة.");
-                return;
-            }
-
-            // Create download link
-            const blob = new Blob([decompressed], { type: "application/octet-stream" });
-            const url = URL.createObjectURL(blob);
-            const link = document.getElementById('download-link');
-            link.href = url;
-            link.download = fileName;
-
-            document.getElementById('res-name').textContent = fileName;
-            document.getElementById('res-size').textContent = (decompressed.length / (1024*1024)).toFixed(2) + " MB";
-            document.getElementById('res-hash').textContent = shortHash + "...";
-
-            document.getElementById('camera-card').style.display = 'none';
-            document.getElementById('dashboard').style.display = 'none';
-            document.getElementById('success-card').style.display = 'block';
         }
 
         function resetScanner() {

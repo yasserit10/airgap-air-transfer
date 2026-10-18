@@ -3,6 +3,7 @@ import SwiftUI
 public struct ContentView: View {
     @StateObject private var engine = ReconstructionEngine()
     @State private var showingShareSheet = false
+    @State private var copiedNotice = false
 
     public init() {}
 
@@ -46,18 +47,18 @@ public struct ContentView: View {
             Spacer()
 
             VStack(spacing: 2) {
-                Text("مستقبل البيانات البصري")
+                Text("مستقبل البيانات البصري فائق السرعة")
                     .font(.headline)
                     .fontWeight(.bold)
                     .foregroundColor(.white)
-                Text("AirGap Optical Receiver")
+                Text("AirGap Optical Receiver Pro (60 FPS)")
                     .font(.caption2)
-                    .foregroundColor(Color.gray)
+                    .foregroundColor(Color.cyan)
             }
 
             Spacer()
 
-            Image(systemName: "shield.lefthalf.filled")
+            Image(systemName: "bolt.shield.fill")
                 .font(.system(size: 20))
                 .foregroundColor(.green)
                 .padding(10)
@@ -84,7 +85,20 @@ public struct ContentView: View {
 
                 // Reticle corners & prompt
                 VStack {
+                    HStack {
+                        Text("⚡ 60 FPS Hardware Vision")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.85))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        Spacer()
+                    }
+                    .padding(12)
+
                     Spacer()
+
                     Text(engine.totalChunks > 0 ? "جاري التقاط الإطارات المتتابعة..." : "وجه الكاميرا نحو شاشة الحاسوب")
                         .font(.footnote)
                         .fontWeight(.semibold)
@@ -93,17 +107,17 @@ public struct ContentView: View {
                         .background(Color.black.opacity(0.75))
                         .foregroundColor(.white)
                         .cornerRadius(20)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 16)
                 }
 
                 if engine.isVerifying {
-                    Color.black.opacity(0.8)
+                    Color.black.opacity(0.85)
                         .cornerRadius(20)
-                    VStack(spacing: 12) {
+                    VStack(spacing: 14) {
                         ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .green))
                             .scaleEffect(1.6)
-                        Text("جاري فك الضغط والتحقق من التجزئة...")
+                        Text("جاري فك الضغط ومطابقة SHA-256...")
                             .foregroundColor(.white)
                             .font(.callout)
                             .fontWeight(.bold)
@@ -128,7 +142,7 @@ public struct ContentView: View {
     private var dashboardCard: some View {
         VStack(spacing: 12) {
             HStack {
-                Text(engine.totalChunks > 0 ? "\(engine.receivedChunks.count) / \(engine.totalChunks) إطار" : "--")
+                Text(engine.totalChunks > 0 ? "\(engine.receivedCount) / \(engine.totalChunks) (\(engine.progressPercentString))" : "--")
                     .font(.system(size: 15, weight: .bold, design: .monospaced))
                     .foregroundColor(.cyan)
 
@@ -151,21 +165,62 @@ public struct ContentView: View {
                     RoundedRectangle(cornerRadius: 6)
                         .fill(LinearGradient(gradient: Gradient(colors: [.cyan, .green]), startPoint: .leading, endPoint: .trailing))
                         .frame(width: geo.size.width * CGFloat(engine.progress), height: 12)
-                        .animation(.easeInOut(duration: 0.2), value: engine.progress)
+                        .animation(.easeInOut(duration: 0.15), value: engine.progress)
                 }
             }
             .frame(height: 12)
 
-            // Visual Chunk Matrix (up to 60 blocks)
-            if engine.totalChunks > 0 && engine.totalChunks <= 80 {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 12), spacing: 4) {
-                    ForEach(1...engine.totalChunks, id: \.self) { idx in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(engine.isChunkReceived(idx) ? Color.green : Color.white.opacity(0.15))
-                            .frame(height: 14)
+            // Missing Frames Alert Box (Solves the Coupon Collector delay!)
+            if engine.isNearCompletion && !engine.missingChunksText.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("الإطارات المتبقية لإكمال الملف (\(engine.missingCount)):")
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundColor(.orange)
+
+                        Spacer()
+
+                        Button(action: {
+                            UIPasteboard.general.string = engine.missingChunksText
+                            copiedNotice = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                copiedNotice = false
+                            }
+                        }) {
+                            Text(copiedNotice ? "تم النسخ ✓" : "نسخ الأرقام")
+                                .font(.caption2)
+                                .fontWeight(.bold)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.orange.opacity(0.35))
+                                .foregroundColor(.white)
+                                .cornerRadius(6)
+                        }
                     }
+
+                    Text(engine.missingChunksText)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white)
+                        .lineLimit(3)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.black.opacity(0.45))
+                        .cornerRadius(6)
+
+                    Text("💡 الصق هذه الأرقام في خانة 'بث النواقص' بالكمبيوتر لإكمال الملف فوراً.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.gray)
                 }
-                .padding(.top, 4)
+                .padding(10)
+                .background(Color(red: 0.25, green: 0.15, blue: 0.05))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.orange.opacity(0.6), lineWidth: 1)
+                )
             }
 
             if let err = engine.errorMessage {
@@ -206,7 +261,7 @@ public struct ContentView: View {
                     .fontWeight(.bold)
                     .foregroundColor(.white)
 
-                Text("تم فك الضغط والتحقق من سلامة التجزئة (SHA-256)")
+                Text("تم فك الضغط ومطابقة رمز التجزئة (SHA-256) بالكامل")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -222,18 +277,18 @@ public struct ContentView: View {
             .cornerRadius(16)
             .padding(.horizontal, 24)
 
-            HStack(spacing: 16) {
+            VStack(spacing: 12) {
                 Button(action: {
                     showingShareSheet = true
                 }) {
                     HStack {
                         Image(systemName: "square.and.arrow.up")
-                        Text("مشاركة أو حفظ الملف")
+                        Text("مشاركة أو حفظ في تطبيق 'الملفات'")
                     }
                     .font(.headline)
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 52)
+                    .frame(height: 54)
                     .background(Color.blue)
                     .cornerRadius(14)
                 }
@@ -241,12 +296,16 @@ public struct ContentView: View {
                 Button(action: {
                     engine.reset()
                 }) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(width: 52, height: 52)
-                        .background(Color.white.opacity(0.15))
-                        .cornerRadius(14)
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text("مسح داتابيس جديدة")
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.8))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(Color.white.opacity(0.12))
+                    .cornerRadius(12)
                 }
             }
             .padding(.horizontal, 24)

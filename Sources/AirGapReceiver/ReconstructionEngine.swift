@@ -4,8 +4,9 @@ import Compression
 import UIKit
 
 public final class ReconstructionEngine: ObservableObject {
+    // Published UI properties (Throttled for ultra-smooth 60 FPS performance)
     @Published public var totalChunks: Int = 0
-    @Published public var receivedChunks: [Int: String] = [:]
+    @Published public var receivedCount: Int = 0
     @Published public var fileName: String = ""
     @Published public var origSize: Int = 0
     @Published public var shortHash: String = ""
@@ -13,19 +14,42 @@ public final class ReconstructionEngine: ObservableObject {
     @Published public var isVerifying: Bool = false
     @Published public var savedFileURL: URL? = nil
     @Published public var errorMessage: String? = nil
+    
+    // Missing frames tracking
+    @Published public var isNearCompletion: Bool = false
+    @Published public var missingChunksText: String = ""
+    @Published public var missingCount: Int = 0
 
-    private let feedbackGenerator = UIImpactFeedbackGenerator(style: .light)
+    // Internal lock-free / thread-safe storage
+    private var chunksStorage: [Int: String] = [:]
+    private let storageLock = NSLock()
+    private let processingQueue = DispatchQueue(label: "com.airgap.processing", qos: .userInteractive)
     private let successGenerator = UINotificationFeedbackGenerator()
-    private let processingQueue = DispatchQueue(label: "com.airgap.processing", qos: .userInitiated)
+
+    // Throttled UI updater (10 Hz) to keep SwiftUI running at 60 FPS without micro-stutters
+    private var uiUpdateTimer: Timer?
+    private var lastPublishedCount: Int = -1
 
     public init() {
-        feedbackGenerator.prepare()
         successGenerator.prepare()
+        startUIThrottleTimer()
+    }
+
+    deinit {
+        uiUpdateTimer?.invalidate()
+    }
+
+    private func startUIThrottleTimer() {
+        DispatchQueue.main.async { [weak self] in
+            self?.uiUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                self?.syncStateToUI()
+            }
+        }
     }
 
     public var progress: Double {
         guard totalChunks > 0 else { return 0.0 }
-        return Double(receivedChunks.count) / Double(totalChunks)
+        return Double(receivedCount) / Double(totalChunks)
     }
 
     public var progressPercentString: String {
@@ -34,18 +58,12 @@ public final class ReconstructionEngine: ObservableObject {
         return "\(pct)%"
     }
 
-    public func isChunkReceived(_ index: Int) -> Bool {
-        return receivedChunks[index] != nil
-    }
-
     public func processScannedCode(_ rawString: String) {
         guard !isComplete && !isVerifying else { return }
-
-        // Must start with protocol header "AG1|"
         guard rawString.hasPrefix("AG1|") else { return }
 
         let parts = rawString.components(separatedBy: "|")
-        // Expected format: AG1|total_chunks|chunk_index|filename|orig_size|short_hash|chunk_data
+        // AG1|total_chunks|chunk_index|filename|orig_size|short_hash|chunk_data
         guard parts.count == 7 else { return }
 
         guard let total = Int(parts[1]),
@@ -56,42 +74,80 @@ public final class ReconstructionEngine: ObservableObject {
         let hash = parts[5]
         let payload = parts[6]
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+        var shouldFinalize = false
 
-            if self.totalChunks == 0 {
-                self.totalChunks = total
-                self.fileName = name
-                self.origSize = size
-                self.shortHash = hash
+        storageLock.lock()
+        if totalChunks == 0 {
+            totalChunks = total
+            fileName = name
+            origSize = size
+            shortHash = hash
+        }
+
+        if chunksStorage[index] == nil {
+            chunksStorage[index] = payload
+            if chunksStorage.count == total {
+                shouldFinalize = true
             }
+        }
+        storageLock.unlock()
 
-            // Only register if we haven't received this chunk yet
-            if self.receivedChunks[index] == nil {
-                self.receivedChunks[index] = payload
-                self.feedbackGenerator.impactOccurred()
+        if shouldFinalize {
+            finalizeReconstruction()
+        }
+    }
 
-                // Check if we reached 100% completion
-                if self.receivedChunks.count == self.totalChunks {
-                    self.finalizeReconstruction()
-                }
+    private func syncStateToUI() {
+        storageLock.lock()
+        let count = chunksStorage.count
+        let total = totalChunks
+        let isDone = isComplete
+        storageLock.unlock()
+
+        guard !isDone, total > 0 else { return }
+
+        if count != lastPublishedCount {
+            lastPublishedCount = count
+            receivedCount = count
+
+            let remaining = total - count
+            missingCount = remaining
+
+            // If remaining <= 50 frames or progress >= 75%, compute missing frames list
+            if remaining <= 50 || (Double(count) / Double(total)) >= 0.75 {
+                storageLock.lock()
+                let missingIndices = (1...total).filter { chunksStorage[$0] == nil }
+                storageLock.unlock()
+
+                isNearCompletion = true
+                missingChunksText = missingIndices.map(String.init).joined(separator: ", ")
+            } else {
+                isNearCompletion = false
+                missingChunksText = ""
             }
         }
     }
 
     private func finalizeReconstruction() {
-        isVerifying = true
-        let chunksCopy = self.receivedChunks
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, !self.isVerifying else { return }
+            self.isVerifying = true
+        }
+
+        storageLock.lock()
+        let chunksCopy = self.chunksStorage
         let total = self.totalChunks
         let expectedHash = self.shortHash
         let targetName = self.fileName
         let expectedSize = self.origSize
+        storageLock.unlock()
 
         processingQueue.async { [weak self] in
             guard let self = self else { return }
 
-            // 1. Reassemble chunks in sequential order 1..total
+            // 1. Reassemble chunks sequentially 1...total
             var combinedBase64 = ""
+            combinedBase64.reserveCapacity(chunksCopy.count * 1500)
             for i in 1...total {
                 if let part = chunksCopy[i] {
                     combinedBase64.append(part)
@@ -113,10 +169,10 @@ public final class ReconstructionEngine: ObservableObject {
                 return
             }
 
-            // 3. Decompress zlib
+            // 3. Decompress using LZMA (or ZLIB fallback)
             guard let decompressedData = self.decompress(data: compressedData, expectedSize: expectedSize) else {
                 DispatchQueue.main.async {
-                    self.errorMessage = "فشل في فك ضغط zlib"
+                    self.errorMessage = "فشل في فك الضغط (LZMA/ZLIB)"
                     self.isVerifying = false
                 }
                 return
@@ -134,7 +190,7 @@ public final class ReconstructionEngine: ObservableObject {
                 return
             }
 
-            // 5. Save to app's Documents directory
+            // 5. Save to app Documents directory
             let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let fileUrl = docsUrl.appendingPathComponent(targetName)
 
@@ -144,6 +200,7 @@ public final class ReconstructionEngine: ObservableObject {
                     self.savedFileURL = fileUrl
                     self.isVerifying = false
                     self.isComplete = true
+                    self.receivedCount = total
                     self.successGenerator.notificationOccurred(.success)
                 }
             } catch {
@@ -201,8 +258,9 @@ public final class ReconstructionEngine: ObservableObject {
     }
 
     public func reset() {
+        storageLock.lock()
+        chunksStorage.removeAll()
         totalChunks = 0
-        receivedChunks.removeAll()
         fileName = ""
         origSize = 0
         shortHash = ""
@@ -210,5 +268,11 @@ public final class ReconstructionEngine: ObservableObject {
         isVerifying = false
         savedFileURL = nil
         errorMessage = nil
+        isNearCompletion = false
+        missingChunksText = ""
+        missingCount = 0
+        lastPublishedCount = -1
+        receivedCount = 0
+        storageLock.unlock()
     }
 }

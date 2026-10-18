@@ -44,6 +44,26 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
                 return
             }
 
+            // Hardware configuration: Continuous autofocus and 60 FPS scan mode
+            try? videoCaptureDevice.lockForConfiguration()
+            if videoCaptureDevice.isFocusModeSupported(.continuousAutoFocus) {
+                videoCaptureDevice.focusMode = .continuousAutoFocus
+            }
+            if videoCaptureDevice.isExposureModeSupported(.continuousAutoExposure) {
+                videoCaptureDevice.exposureMode = .continuousAutoExposure
+            }
+            for vFormat in videoCaptureDevice.formats {
+                for range in vFormat.videoSupportedFrameRateRanges {
+                    if range.maxFrameRate >= 60.0 {
+                        videoCaptureDevice.activeFormat = vFormat
+                        videoCaptureDevice.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
+                        videoCaptureDevice.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 60)
+                        break
+                    }
+                }
+            }
+            videoCaptureDevice.unlockForConfiguration()
+
             let metadataOutput = AVCaptureMetadataOutput()
             if session.canAddOutput(metadataOutput) {
                 session.addOutput(metadataOutput)
