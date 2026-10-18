@@ -17,14 +17,20 @@ jobs:
 
       - name: Compile Native ARM64 Mach-O Binary
         run: |
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "Compiling with iOS SDK at: $SDK_PATH"
-          swift build -c release \
-            -Xswiftc "-sdk" -Xswiftc "$SDK_PATH" \
-            -Xswiftc "-target" -Xswiftc "arm64-apple-ios16.0"
+          xcodebuild -list
+          
+          xcodebuild build \
+            -scheme "AirGapReceiver" \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            BUILD_DIR=./build \
+            -derivedDataPath ./DerivedData
 
           mkdir -p Payload/AirGapReceiver.app
-          BIN_PATH=$(find .build -type f -name "AirGapReceiver" | grep -v "\.dSYM" | head -n 1)
+          BIN_PATH=$(find ./build ./DerivedData -type f -name "AirGapReceiver" | grep -v "\.dSYM" | head -n 1)
           echo "Found binary at: $BIN_PATH"
           cp "$BIN_PATH" Payload/AirGapReceiver.app/AirGapReceiver
           cp Info.plist Payload/AirGapReceiver.app/Info.plist
