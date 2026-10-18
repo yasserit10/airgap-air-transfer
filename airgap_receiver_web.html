@@ -261,21 +261,60 @@
                     compressed[i] = binaryString.charCodeAt(i);
                 }
 
-                let decompressed;
-                try {
-                    decompressed = pako.inflate(compressed);
-                } catch (zlibErr) {
-                    console.log("Pako inflate error, checking fallback:", zlibErr);
-                    if (compressed[0] === 0xFD && typeof LZMA !== 'undefined') {
-                        decompressed = await new Promise((resolve, reject) => {
-                            LZMA.decompress(compressed, function(result, error) {
-                                if (error) reject(error);
-                                else resolve(typeof result === 'string' ? new TextEncoder().encode(result) : new Uint8Array(result));
-                            });
-                        });
-                    } else {
-                        throw zlibErr;
+                let decompressed = null;
+
+                // 1. Try native DecompressionStream (Built-in on iOS Safari 16.4+, Chrome, Firefox with zero downloads)
+                if (typeof DecompressionStream !== 'undefined') {
+                    try {
+                        const ds = new DecompressionStream('deflate');
+                        const writer = ds.writable.getWriter();
+                        writer.write(compressed);
+                        writer.close();
+                        const buffer = await new Response(ds.readable).arrayBuffer();
+                        decompressed = new Uint8Array(buffer);
+                    } catch (dsErr) {
+                        try {
+                            let raw = compressed;
+                            if (compressed.length > 6 && compressed[0] === 0x78) {
+                                raw = compressed.subarray(2, compressed.length - 4);
+                            }
+                            const ds = new DecompressionStream('deflate-raw');
+                            const writer = ds.writable.getWriter();
+                            writer.write(raw);
+                            writer.close();
+                            const buffer = await new Response(ds.readable).arrayBuffer();
+                            decompressed = new Uint8Array(buffer);
+                        } catch (rawErr) {
+                            console.log("Native DecompressionStream fallback to pako:", rawErr);
+                        }
                     }
+                }
+
+                // 2. Fallback to pako if loaded
+                if (!decompressed && typeof pako !== 'undefined') {
+                    try {
+                        decompressed = pako.inflate(compressed);
+                    } catch (zlibErr) {
+                        try {
+                            decompressed = pako.inflateRaw(compressed.subarray(2, compressed.length - 4));
+                        } catch (rawErr) {
+                            console.log("Pako inflate error, checking LZMA fallback:", rawErr);
+                        }
+                    }
+                }
+
+                // 3. Fallback to LZMA if archive starts with XZ magic
+                if (!decompressed && compressed[0] === 0xFD && typeof LZMA !== 'undefined') {
+                    decompressed = await new Promise((resolve, reject) => {
+                        LZMA.decompress(compressed, function(result, error) {
+                            if (error) reject(error);
+                            else resolve(typeof result === 'string' ? new TextEncoder().encode(result) : new Uint8Array(result));
+                        });
+                    });
+                }
+
+                if (!decompressed) {
+                    throw new Error("فشل فك ضغط الملف. تأكد من إكمال جميع الأجزاء ومطابقتها.");
                 }
 
                 // Compute SHA-256

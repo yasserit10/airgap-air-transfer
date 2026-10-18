@@ -22,6 +22,8 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
     private var captureSession: AVCaptureSession?
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
+    private var lastScannedCode: String = ""
+
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
@@ -30,7 +32,8 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
 
     private func setupCamera() {
         let session = AVCaptureSession()
-        session.sessionPreset = .high
+        // inputPriority tells AVFoundation that device.activeFormat controls resolution and frame rate
+        session.sessionPreset = .inputPriority
 
         guard let videoCaptureDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             return
@@ -44,23 +47,54 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
                 return
             }
 
-            // Hardware configuration: Continuous autofocus and 60 FPS scan mode
-            try? videoCaptureDevice.lockForConfiguration()
-            if videoCaptureDevice.isFocusModeSupported(.continuousAutoFocus) {
-                videoCaptureDevice.focusMode = .continuousAutoFocus
-            }
-            if videoCaptureDevice.isExposureModeSupported(.continuousAutoExposure) {
-                videoCaptureDevice.exposureMode = .continuousAutoExposure
-            }
-            for vFormat in videoCaptureDevice.formats {
-                for range in vFormat.videoSupportedFrameRateRanges {
+            // Find optimal 1080p 60 FPS format:
+            // 1080p has ample resolution for dense barcodes while avoiding 4K thermal/memory bottlenecks
+            var bestFormat: AVCaptureDevice.Format? = nil
+            for format in videoCaptureDevice.formats {
+                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                for range in format.videoSupportedFrameRateRanges {
                     if range.maxFrameRate >= 60.0 {
-                        videoCaptureDevice.activeFormat = vFormat
-                        videoCaptureDevice.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
-                        videoCaptureDevice.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 60)
+                        if dims.width == 1920 && dims.height == 1080 {
+                            bestFormat = format
+                            break
+                        } else if bestFormat == nil && dims.width <= 1920 && dims.width >= 1280 {
+                            bestFormat = format
+                        }
+                    }
+                }
+                if let best = bestFormat {
+                    let d = CMVideoFormatDescriptionGetDimensions(best.formatDescription)
+                    if d.width == 1920 && d.height == 1080 {
                         break
                     }
                 }
+            }
+
+            try? videoCaptureDevice.lockForConfiguration()
+            if let targetFormat = bestFormat {
+                videoCaptureDevice.activeFormat = targetFormat
+                videoCaptureDevice.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
+                videoCaptureDevice.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 60)
+            }
+
+            // Hardware configuration: Continuous autofocus restricted to near-range (computer monitor distance)
+            if videoCaptureDevice.isFocusModeSupported(.continuousAutoFocus) {
+                videoCaptureDevice.focusMode = .continuousAutoFocus
+            }
+            if videoCaptureDevice.isAutoFocusRangeRestrictionSupported {
+                videoCaptureDevice.autoFocusRangeRestriction = .near
+            }
+
+            // Continuous auto-exposure with slight negative bias to eliminate screen blowout/glare
+            if videoCaptureDevice.isExposureModeSupported(.continuousAutoExposure) {
+                videoCaptureDevice.exposureMode = .continuousAutoExposure
+            }
+            if videoCaptureDevice.isExposureTargetBiasSupported {
+                let bias = max(videoCaptureDevice.minExposureTargetBias, -0.75)
+                videoCaptureDevice.setExposureTargetBias(bias, completionHandler: nil)
+            }
+            if videoCaptureDevice.isLowLightBoostSupported {
+                videoCaptureDevice.automaticallyEnablesLowLightBoostWhenAvailable = false
             }
             videoCaptureDevice.unlockForConfiguration()
 
@@ -69,6 +103,13 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
                 session.addOutput(metadataOutput)
                 metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.global(qos: .userInteractive))
                 metadataOutput.metadataObjectTypes = [.qr]
+
+                // Disable video stabilization to eliminate multi-frame buffering latency and motion blur
+                for connection in metadataOutput.connections {
+                    if connection.isVideoStabilizationSupported {
+                        connection.preferredVideoStabilizationMode = .off
+                    }
+                }
             } else {
                 return
             }
@@ -98,7 +139,12 @@ public class CameraScannerViewController: UIViewController, AVCaptureMetadataOut
         for metadata in metadataObjects {
             if let readableObject = metadata as? AVMetadataMachineReadableCodeObject,
                let stringValue = readableObject.stringValue {
-                onCodeScanned?(stringValue)
+                // Deduplicate immediate identical scans right at the camera layer
+                // Prevents redundant processing of the same frame 4-5 times at 60 FPS
+                if stringValue != lastScannedCode {
+                    lastScannedCode = stringValue
+                    onCodeScanned?(stringValue)
+                }
             }
         }
     }
