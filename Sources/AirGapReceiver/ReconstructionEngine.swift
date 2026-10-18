@@ -215,9 +215,30 @@ public final class ReconstructionEngine: ObservableObject {
     private func decompress(data: Data, expectedSize: Int) -> Data? {
         let isXZ = data.starts(with: [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00])
 
-        // Apple's COMPRESSION_ZLIB strictly expects raw DEFLATE (RFC 1951).
-        // Standard zlib streams (RFC 1950) start with 0x78 and have a 4-byte Adler-32 trailer.
-        // We prepare candidate buffers: if 0x78 is present, slice off header and trailer.
+        // Allocate sufficient buffer: expected original size + 2MB safety margin
+        let bufferSize = max(expectedSize + 2097152, data.count * 20)
+        var destinationData = Data(count: bufferSize)
+
+        // 1. If it's an XZ stream, decode with COMPRESSION_LZMA first
+        if isXZ {
+            let decodedSizeLZMA = destinationData.withUnsafeMutableBytes { destBuffer in
+                data.withUnsafeBytes { srcBuffer in
+                    compression_decode_buffer(
+                        destBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                        bufferSize,
+                        srcBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                        data.count,
+                        nil,
+                        COMPRESSION_LZMA
+                    )
+                }
+            }
+            if decodedSizeLZMA > 0 {
+                return destinationData.prefix(decodedSizeLZMA)
+            }
+        }
+
+        // 2. Try ZLIB decoding (raw deflate or stripped zlib)
         var candidates: [Data] = []
         if data.count > 6 && data.first == 0x78 {
             let start = data.startIndex + 2
@@ -229,32 +250,26 @@ public final class ReconstructionEngine: ObservableObject {
         }
         candidates.append(data)
 
-        let bufferSize = max(expectedSize, data.count * 15)
-        var destinationData = Data(count: bufferSize)
-
-        // Try ZLIB decoding (raw deflate or stripped zlib)
-        if !isXZ {
-            for candidate in candidates {
-                let decodedSize = destinationData.withUnsafeMutableBytes { destBuffer in
-                    candidate.withUnsafeBytes { srcBuffer in
-                        compression_decode_buffer(
-                            destBuffer.bindMemory(to: UInt8.self).baseAddress!,
-                            bufferSize,
-                            srcBuffer.bindMemory(to: UInt8.self).baseAddress!,
-                            candidate.count,
-                            nil,
-                            COMPRESSION_ZLIB
-                        )
-                    }
+        for candidate in candidates {
+            let decodedSize = destinationData.withUnsafeMutableBytes { destBuffer in
+                candidate.withUnsafeBytes { srcBuffer in
+                    compression_decode_buffer(
+                        destBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                        bufferSize,
+                        srcBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                        candidate.count,
+                        nil,
+                        COMPRESSION_ZLIB
+                    )
                 }
-                if decodedSize > 0 {
-                    return destinationData.prefix(decodedSize)
-                }
+            }
+            if decodedSize > 0 {
+                return destinationData.prefix(decodedSize)
             }
         }
 
-        // Try LZMA decoding
-        let decodedSizeLZMA = destinationData.withUnsafeMutableBytes { destBuffer in
+        // 3. Fallback to LZMA even if magic header differed
+        let fallbackLZMASize = destinationData.withUnsafeMutableBytes { destBuffer in
             data.withUnsafeBytes { srcBuffer in
                 compression_decode_buffer(
                     destBuffer.bindMemory(to: UInt8.self).baseAddress!,
@@ -266,25 +281,8 @@ public final class ReconstructionEngine: ObservableObject {
                 )
             }
         }
-        if decodedSizeLZMA > 0 {
-            return destinationData.prefix(decodedSizeLZMA)
-        }
-
-        // Final fallback: try raw ZLIB on full data
-        let fallbackSize = destinationData.withUnsafeMutableBytes { destBuffer in
-            data.withUnsafeBytes { srcBuffer in
-                compression_decode_buffer(
-                    destBuffer.bindMemory(to: UInt8.self).baseAddress!,
-                    bufferSize,
-                    srcBuffer.bindMemory(to: UInt8.self).baseAddress!,
-                    data.count,
-                    nil,
-                    COMPRESSION_ZLIB
-                )
-            }
-        }
-        if fallbackSize > 0 {
-            return destinationData.prefix(fallbackSize)
+        if fallbackLZMASize > 0 {
+            return destinationData.prefix(fallbackLZMASize)
         }
 
         return nil
